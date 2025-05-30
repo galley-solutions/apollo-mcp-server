@@ -598,6 +598,17 @@ impl ServerHandler for Running {
         request: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        // Merge Authorization header from the request context with the server's headers.
+        let mut merged_headers = self.headers.clone();
+        if let Some(http_request_part) = _context.extensions.get::<axum::http::request::Parts>() {
+            let initialize_headers = &http_request_part.headers;
+            for (key, value) in initialize_headers.iter() {
+                if key == "authorization" || key == "Authorization" {
+                    merged_headers.insert(key.clone(), value.clone());
+                }
+            }
+        }
+
         if request.name == INTROSPECT_TOOL_NAME {
             self.introspect_tool
                 .as_ref()
@@ -614,7 +625,7 @@ impl ServerHandler for Running {
             let graphql_request = graphql::Request {
                 input: Value::from(request.arguments.clone()),
                 endpoint: &self.endpoint,
-                headers: self.headers.clone(),
+                headers: merged_headers.clone(),
             };
             if request.name == EXECUTE_TOOL_NAME {
                 self.execute_tool

@@ -28,6 +28,7 @@ tracing.workspace = true
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 tokio-util = "0.7.15"
 webbrowser = "1.0.4"
+axum = { version = "0.8", features = ["macros"] }
 
 [dev-dependencies]
 insta = { workspace = true }

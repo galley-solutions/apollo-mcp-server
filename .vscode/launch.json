@@ -70,6 +70,64 @@
             ],
             "cwd": "${workspaceFolder}",
             "console": "integratedTerminal"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Run apollo-mcp-server [Galley SSE]",
+            "runtimeExecutable": "cargo",
+            "runtimeArgs": [
+                "run",
+                "--bin",
+                "apollo-mcp-server",
+                "--",
+                "--directory",
+                "./",
+                "-u",
+                "--sse-port",
+                "5001",
+                "--endpoint",
+                "https://staging-app.galleysolutions.com/graphql"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "env": {
+                "RUST_BACKTRACE": "1",
+                "APOLLO_KEY": "",
+                "APOLLO_GRAPH_REF": "Galley-dtd1yd@current"
+            }
+        },
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug apollo-mcp-server [Galley SSE]",
+            "cargo": {
+                "args": [
+                    "build",
+                    "--bin=apollo-mcp-server",
+                    "--lib"
+                ],
+                "filter": {
+                    "name": "apollo-mcp-server",
+                    "kind": "bin"
+                }
+            },
+            "args": [
+                "--directory",
+                "./",
+                "-u",
+                "--introspection",
+                "--sse-port",
+                "5001",
+                "--endpoint",
+                "https://staging-app.galleysolutions.com/graphql"
+            ],
+            "cwd": "${workspaceFolder}",
+            "env": {
+                "RUST_BACKTRACE": "1",
+                "APOLLO_KEY": "",
+                "APOLLO_GRAPH_REF": "Galley-dtd1yd@current"
+            }
         }
     ]
 }
