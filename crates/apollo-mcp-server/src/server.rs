@@ -28,6 +28,7 @@ pub use apollo_mcp_registry::uplink::persisted_queries::ManifestSource;
 pub use apollo_mcp_registry::uplink::schema::SchemaSource;
 use apollo_mcp_registry::uplink::schema::SchemaState;
 use apollo_mcp_registry::uplink::schema::event::Event as SchemaEvent;
+use axum;
 use futures::{FutureExt, Stream, StreamExt, future, stream};
 pub use rmcp::ServiceExt;
 pub use rmcp::transport::SseServer;
@@ -421,14 +422,34 @@ impl Starting {
                 info!(port = ?port, address = ?address, "Starting MCP server in Streamable HTTP mode");
                 let running = running.clone();
                 let listen_address = SocketAddr::new(address, port);
-                StreamableHttpServer::serve_with_config(StreamableHttpServerConfig {
+
+                // Create a custom router with healthcheck endpoint
+                let (server, mcp_router) = StreamableHttpServer::new(StreamableHttpServerConfig {
                     bind: listen_address,
                     path: "/mcp".to_string(),
-                    ct: cancellation_token,
+                    ct: cancellation_token.clone(),
                     sse_keep_alive: None,
-                })
-                .await?
-                .with_service(move || running.clone());
+                });
+
+                // Add the healthcheck endpoint to the router
+                let router =
+                    mcp_router.route("/healthcheck", axum::routing::get(|| async { "ok" }));
+
+                // Start the server manually
+                let listener = tokio::net::TcpListener::bind(listen_address).await?;
+                let ct = cancellation_token.child_token();
+                let axum_server =
+                    axum::serve(listener, router).with_graceful_shutdown(async move {
+                        ct.cancelled().await;
+                        info!("streamable http server cancelled");
+                    });
+                tokio::spawn(async move {
+                    if let Err(e) = axum_server.await {
+                        error!(error = %e, "streamable http server shutdown with error");
+                    }
+                });
+
+                server.with_service(move || running.clone());
             }
             Transport::SSE { address, port } => {
                 info!(port = ?port, address = ?address, "Starting MCP server in SSE mode");
