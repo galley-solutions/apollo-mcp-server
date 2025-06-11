@@ -112,6 +112,12 @@ struct Args {
     /// [default: 5000]
     #[arg(long, conflicts_with_all(["sse_port", "sse_address"]))]
     http_port: Option<u16>,
+
+    /// Port for the healthcheck endpoint when using HTTP or SSE transport
+    ///
+    /// If specified, starts a separate HTTP server with a /healthcheck endpoint
+    #[arg(long)]
+    healthcheck_port: Option<u16>,
 }
 
 #[tokio::main]
@@ -122,11 +128,13 @@ async fn main() -> anyhow::Result<()> {
         Transport::StreamableHttp {
             address: args.http_address.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             port: args.http_port.unwrap_or(5000),
+            healthcheck_port: args.healthcheck_port,
         }
     } else if args.sse_port.is_some() || args.sse_address.is_some() {
         Transport::SSE {
             address: args.sse_address.unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             port: args.sse_port.unwrap_or(5000),
+            healthcheck_port: args.healthcheck_port,
         }
     } else {
         Transport::Stdio

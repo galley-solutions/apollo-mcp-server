@@ -28,7 +28,6 @@ pub use apollo_mcp_registry::uplink::persisted_queries::ManifestSource;
 pub use apollo_mcp_registry::uplink::schema::SchemaSource;
 use apollo_mcp_registry::uplink::schema::SchemaState;
 use apollo_mcp_registry::uplink::schema::event::Event as SchemaEvent;
-use axum;
 use futures::{FutureExt, Stream, StreamExt, future, stream};
 pub use rmcp::ServiceExt;
 pub use rmcp::transport::SseServer;
@@ -57,8 +56,16 @@ pub struct Server {
 #[derive(Clone)]
 pub enum Transport {
     Stdio,
-    SSE { address: IpAddr, port: u16 },
-    StreamableHttp { address: IpAddr, port: u16 },
+    SSE {
+        address: IpAddr,
+        port: u16,
+        healthcheck_port: Option<u16>,
+    },
+    StreamableHttp {
+        address: IpAddr,
+        port: u16,
+        healthcheck_port: Option<u16>,
+    },
 }
 
 #[bon]
@@ -418,41 +425,59 @@ impl Starting {
         };
 
         match self.transport {
-            Transport::StreamableHttp { address, port } => {
+            Transport::StreamableHttp {
+                address,
+                port,
+                healthcheck_port,
+            } => {
                 info!(port = ?port, address = ?address, "Starting MCP server in Streamable HTTP mode");
+
+                // Start healthcheck server if configured
+                if let Some(hc_port) = healthcheck_port {
+                    let hc_address = SocketAddr::new(address, hc_port);
+                    let hc_cancellation_token = cancellation_token.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            Self::start_healthcheck_server(hc_address, hc_cancellation_token).await
+                        {
+                            error!("Failed to start healthcheck server: {:?}", e);
+                        }
+                    });
+                    info!(port = ?hc_port, address = ?address, "Started healthcheck server");
+                }
+
                 let running = running.clone();
                 let listen_address = SocketAddr::new(address, port);
-
-                // Create a custom router with healthcheck endpoint
-                let (server, mcp_router) = StreamableHttpServer::new(StreamableHttpServerConfig {
+                StreamableHttpServer::serve_with_config(StreamableHttpServerConfig {
                     bind: listen_address,
                     path: "/mcp".to_string(),
-                    ct: cancellation_token.clone(),
+                    ct: cancellation_token,
                     sse_keep_alive: None,
-                });
-
-                // Add the healthcheck endpoint to the router
-                let router =
-                    mcp_router.route("/healthcheck", axum::routing::get(|| async { "ok" }));
-
-                // Start the server manually
-                let listener = tokio::net::TcpListener::bind(listen_address).await?;
-                let ct = cancellation_token.child_token();
-                let axum_server =
-                    axum::serve(listener, router).with_graceful_shutdown(async move {
-                        ct.cancelled().await;
-                        info!("streamable http server cancelled");
-                    });
-                tokio::spawn(async move {
-                    if let Err(e) = axum_server.await {
-                        error!(error = %e, "streamable http server shutdown with error");
-                    }
-                });
-
-                server.with_service(move || running.clone());
+                })
+                .await?
+                .with_service(move || running.clone());
             }
-            Transport::SSE { address, port } => {
+            Transport::SSE {
+                address,
+                port,
+                healthcheck_port,
+            } => {
                 info!(port = ?port, address = ?address, "Starting MCP server in SSE mode");
+
+                // Start healthcheck server if configured
+                if let Some(hc_port) = healthcheck_port {
+                    let hc_address = SocketAddr::new(address, hc_port);
+                    let hc_cancellation_token = cancellation_token.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            Self::start_healthcheck_server(hc_address, hc_cancellation_token).await
+                        {
+                            error!("Failed to start healthcheck server: {:?}", e);
+                        }
+                    });
+                    info!(port = ?hc_port, address = ?address, "Started healthcheck server");
+                }
+
                 let running = running.clone();
                 let listen_address = SocketAddr::new(address, port);
                 SseServer::serve_with_config(SseServerConfig {
@@ -475,6 +500,49 @@ impl Starting {
         }
 
         Ok(running)
+    }
+
+    async fn start_healthcheck_server(
+        address: SocketAddr,
+        cancellation_token: CancellationToken,
+    ) -> Result<(), ServerError> {
+        use axum::{Router, response::Json, routing::get};
+        use serde_json::json;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let app = Router::new().route(
+            "/healthcheck",
+            get(|| async {
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+
+                Json(json!({
+                    "status": "ok",
+                    "timestamp": timestamp
+                }))
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind(address)
+            .await
+            .map_err(ServerError::ReadFile)?;
+
+        tokio::spawn(async move {
+            let shutdown_signal = async move {
+                cancellation_token.cancelled().await;
+            };
+
+            axum::serve(listener, app)
+                .with_graceful_shutdown(shutdown_signal)
+                .await
+                .unwrap_or_else(|e| {
+                    error!("Healthcheck server error: {:?}", e);
+                });
+        });
+
+        Ok(())
     }
 }
 
