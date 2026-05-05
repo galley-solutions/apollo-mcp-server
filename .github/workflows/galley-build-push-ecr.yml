@@ -1,0 +1,130 @@
+name: Galley — Build & Push to ECR
+
+on:
+  push:
+    branches:
+      - galley-fix-files-rs-deadlock
+      - galley-fix-v1.13.0
+    tags:
+      - 'v*-galley.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Image tag (e.g., v1.7.0-galley.1). If empty, derived from ref.'
+        required: false
+        type: string
+
+env:
+  AWS_REGION: us-west-2
+  ECR_REGISTRY: 334019438465.dkr.ecr.us-west-2.amazonaws.com
+  ECR_REPOSITORY: apollo-mcp-server
+
+jobs:
+  build-push:
+    # ubuntu-24.04-arm = native ARM64 runner. jelly-mcp-server prod image is
+    # arm64/v8 (EKS auto-mode runs ARM nodes), so we only need arm64 and want
+    # to avoid QEMU emulation overhead on x86 runners (~50min vs ~10min native).
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          GIT_REF: ${{ github.ref }}
+          GIT_REF_NAME: ${{ github.ref_name }}
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            TAG="${INPUT_TAG}"
+          elif [[ "${GIT_REF}" == refs/tags/* ]]; then
+            TAG="${GIT_REF#refs/tags/}"
+          else
+            SHORT_SHA="${GIT_SHA:0:7}"
+            SAFE_REF="${GIT_REF_NAME//[^a-zA-Z0-9._-]/_}"
+            TAG="branch-${SAFE_REF}-${SHORT_SHA}"
+          fi
+          if ! [[ "${TAG}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
+            echo "::error::Refusing unsafe tag: ${TAG}"
+            exit 1
+          fi
+          echo "image_tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: ${TAG}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure ECR repository exists
+        env:
+          REPO: ${{ env.ECR_REPOSITORY }}
+          REGION: ${{ env.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          aws ecr describe-repositories \
+            --repository-names "${REPO}" \
+            --region "${REGION}" >/dev/null 2>&1 || \
+          aws ecr create-repository \
+            --repository-name "${REPO}" \
+            --region "${REGION}" \
+            --image-scanning-configuration scanOnPush=true \
+            --image-tag-mutability MUTABLE
+
+      - name: Compute build metadata
+        id: meta
+        run: |
+          set -euo pipefail
+          echo "created=$(git log -1 --format='%aI')" >> "$GITHUB_OUTPUT"
+          echo "epoch=$(git log -1 --format='%at')" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image (versioned + latest)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.image_tag }}
+            ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest
+          labels: |
+            org.opencontainers.image.created=${{ steps.meta.outputs.created }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.tag.outputs.image_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ steps.meta.outputs.epoch }}
+
+      - name: Summary
+        env:
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          REGISTRY: ${{ env.ECR_REGISTRY }}
+          REPO: ${{ env.ECR_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Pushed to ECR"
+            echo
+            echo "- \`${REGISTRY}/${REPO}:${IMAGE_TAG}\`"
+            echo "- \`${REGISTRY}/${REPO}:latest\`"
+          } >> "$GITHUB_STEP_SUMMARY"
